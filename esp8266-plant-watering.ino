@@ -751,7 +751,7 @@ void loop() {
       lcd.setCursor(13, 1);
       if (autoMode) {
         lcd.print(" ON");
-      } else {111
+      } else {
         lcd.print("OFF");
       }
       lastAutoMode = autoMode;
