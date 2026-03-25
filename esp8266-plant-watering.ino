@@ -23,6 +23,10 @@ void setupTimeZone() {
   tzset();
 }
 
+bool bothButtonsPressed() {
+  return (digitalRead(BTN_LEFT) == LOW && digitalRead(BTN_RIGHT) == LOW);
+}
+
 void setDefaultTime() {
   currentEpoch = 1742936400;
   epochBaseMillis = millis();
@@ -86,10 +90,14 @@ int noWaterCounter = 0;
 bool noWaterFlag = false;
 int currentSlide = 0;  // 0 - главный, 1 - погода
 
+bool eternalSleep = false;      // режим вечного сна
+unsigned long messageStartTime = 0;
+bool messageShowing = false;
+const unsigned long MESSAGE_DURATION = 3000;  // 3 секунды показываем сообщение
+
 int lastHour = -1, lastMinute = -1, lastDay = -1, lastMonth = -1;
 int lastDisplayedHumidity = -1;
 bool lastAutoMode = true;
-
 int autoHours[3] = {12, 17, 20};
 int autoMinutes[3] = {0, 0, 0};
 const int AUTO_TIMES_COUNT = 3;
@@ -670,49 +678,92 @@ void setup() {
   lastActivity = millis();
 }
 
-// ======================= LOOP ==========================
 void loop() {
   server.handleClient();
   
   int btn = getButtonEvent();
   
-  // Пробуждение только левой кнопкой
-  if (!displayActive && btn == 1) {
-    wakeDisplay();
+  // === 1. ВЕЧНЫЙ СОН (режим отдыха) ===
+  if (eternalSleep) {
+    return;  // полная блокировка, ничего не делаем
+  }
+  
+  // === 2. ПОКАЗ СООБЩЕНИЯ ===
+  if (messageShowing) {
+    if (millis() - messageStartTime > MESSAGE_DURATION) {
+      lcd.noBacklight();
+      lcd.clear();
+      displayActive = false;
+      messageShowing = false;
+      eternalSleep = true;  // после сообщения уходим в вечный сон
+    }
+    return;  // пока сообщение на экране — ничего больше не делаем
+  }
+  
+  // === 3. СПЯЧКА (дисплей выключен) ===
+  if (!displayActive) {
+    if (btn == 1) {
+      wakeDisplay();
+      currentSlide = 0;
+      updateDisplay();
+    }
+    else if (btn == 2) {
+      // отключаем Wi-Fi
+      WiFi.softAPdisconnect(true);
+      server.close();
+      
+      // показываем сообщение
+      lcd.backlight();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Enjoy your rest");
+      lcd.setCursor(0, 1);
+      lcd.print("Good bye!");
+      messageStartTime = millis();
+      messageShowing = true;
+      displayActive = true;
+    }
+    return;  // если спим и кнопки не нажаты — выходим
+  }
+  
+  // === 4. АКТИВНЫЙ РЕЖИМ (дисплей включён) ===
+  
+  // одновременное нажатие двух кнопок — выключение
+  if (bothButtonsPressed()) {
+    sleepDisplay();
     currentSlide = 0;
+    lastActivity = millis();
+    return;
+  }
+  
+  // короткое нажатие правой — переключение слайда
+  if (btn == 2) {
+    currentSlide = (currentSlide + 1) % 3;
     updateDisplay();
+    lastActivity = millis();
   }
   
-  if (displayActive) {
-    // Короткое нажатие правой кнопки — переключение слайда
-    if (btn == 2) {
-      currentSlide = (currentSlide == 0) ? 1 : 0;
-      updateDisplay();
-      lastActivity = millis();
+  // длинное нажатие левой — полив
+  if (btn == 4) {
+    if (!noWaterFlag && getSoilPercent() <= 75) {
+      requestWatering(false);
     }
-    
-    // Длинное нажатие левой — полив
-    if (btn == 4) {
-      if (!noWaterFlag && getSoilPercent() <= 75) {
-        requestWatering(false);
-      }
-      lastActivity = millis();
-    }
-    
-    // Длинное нажатие правой — переключение режима AUTO/MANUAL
-    if (btn == 5) {
-      autoMode = !autoMode;
-      updateDisplay();
-      lastActivity = millis();
-    }
-    
-    // Сброс таймера активности при любом нажатии
-    if (btn != 0) {
-      lastActivity = millis();
-    }
+    lastActivity = millis();
   }
   
-  // Таймаут сна
+  // длинное нажатие правой — переключение AUTO/MANUAL
+  if (btn == 5) {
+    autoMode = !autoMode;
+    updateDisplay();
+    lastActivity = millis();
+  }
+  
+  // сброс таймера активности
+  if (btn != 0) {
+    lastActivity = millis();
+  }
+  
+  // автоотключение дисплея
   if (displayActive && !watering && (millis() - lastActivity > SLEEP_TIMEOUT)) {
     sleepDisplay();
   }
@@ -720,10 +771,9 @@ void loop() {
   wateringMachine();
   checkAutoWatering();
   
-  // Обновление главного слайда (только если активен и не полив)
+  // обновление главного слайда (только цифры)
   if (displayActive && !watering && currentSlide == 0 && (millis() - lastDisplayUpdate > DISPLAY_UPDATE_INTERVAL)) {
     lastDisplayUpdate = millis();
-    // Обновляем только данные на главном слайде без полной перерисовки
     int humidity = (int)getSoilPercent();
     int h = getHour();
     int m = getMinute();
